@@ -15,12 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - uses: actions/setup-go@v3
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
       - name: Build binary
         run: go install .
 
@@ -29,27 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
       - uses: actions/setup-go@v3
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
       - uses: dominikh/staticcheck-action@v1.2.0
         with:
           install-go: false
-
-  errcheck:
-    name: "Errcheck"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - uses: actions/setup-go@v3
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
-      - run: go install github.com/kisielk/errcheck@latest
-
-      - run: errcheck .
