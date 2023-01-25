@@ -53,6 +53,14 @@ func run() error {
 		log.SetOutput(io.Discard)
 	}
 
+	log.Printf("opening source database: %s", src)
+
+	srcDBFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = srcDBFile.Close() }()
+
 	log.Printf("opening destination file: %s", dst)
 
 	// Open destination database file.
@@ -95,15 +103,7 @@ func run() error {
 		}
 	}
 
-	log.Printf("opening source database: %s", src)
-
 	// Copy from src
-	srcDBFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = srcDBFile.Close() }()
-
 	fi, err := srcDBFile.Stat()
 	if err != nil {
 		return err
