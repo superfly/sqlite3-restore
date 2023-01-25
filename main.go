@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -40,11 +41,19 @@ func main() {
 
 func run() error {
 	timeout := flag.Duration("timeout", 5*time.Second, "lock timeout")
+	verbose := flag.Bool("v", false, "verbose logging")
 	flag.Parse()
 	if flag.NArg() != 2 {
 		return fmt.Errorf("usage: sqlite3-restore SRC DST")
 	}
 	src, dst := flag.Arg(0), flag.Arg(1)
+
+	// Setup debug logger.
+	if !*verbose {
+		log.SetOutput(io.Discard)
+	}
+
+	log.Printf("opening destination file: %s", dst)
 
 	// Open destination database file.
 	dstDBFile, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE, 0666)
@@ -59,6 +68,7 @@ func run() error {
 		ctx, cancel := context.WithTimeout(lockCtx, *timeout)
 		defer cancel()
 		lockCtx = ctx
+		log.Printf("set lock timeout to: %s", *timeout)
 	}
 
 	// Acquire all locks required for exclusive access.
@@ -70,6 +80,8 @@ func run() error {
 		defer func() { _ = dstSHMFile.Close() }()
 	}
 
+	log.Printf("removing journal file: %s-journal", dst)
+
 	// Remove the journal file if one exists.
 	if err := os.Remove(dst + "-journal"); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove journal file: %w", err)
@@ -77,10 +89,13 @@ func run() error {
 
 	// If this is WAL mode, truncate the WAL file.
 	if dstSHMFile != nil {
+		log.Printf("truncating WAL file: %s-wal", dst)
 		if err := os.Truncate(dst+"-wal", 0); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("truncate wal: %w", err)
 		}
 	}
+
+	log.Printf("opening source database: %s", src)
 
 	// Copy from src
 	srcDBFile, err := os.Open(src)
@@ -100,9 +115,15 @@ func run() error {
 	if _, err := srcDBFile.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+
+	log.Printf("copying from source to destination: %s", src)
+
 	if _, err := io.Copy(dstDBFile, srcDBFile); err != nil {
 		return fmt.Errorf("copy database: %w", err)
 	}
+
+	log.Printf("truncating destination database to size: %d", fi.Size())
+
 	if err := dstDBFile.Truncate(fi.Size()); err != nil {
 		return fmt.Errorf("set destination database size: %w", err)
 	}
@@ -112,10 +133,13 @@ func run() error {
 
 	// Invalidate SHM.
 	if dstSHMFile != nil {
+		log.Printf("invalidating SHM file: %s", dstSHMFile.Name())
 		if _, err := dstSHMFile.WriteAt(make([]byte, 136), 0); err != nil {
 			return fmt.Errorf("invalidate shm file: %w", err)
 		}
 	}
+
+	log.Printf("fsync parent directory: %s", filepath.Dir(dst))
 
 	// Fsync parent directory.
 	dir, err := os.Open(filepath.Dir(dst))
@@ -127,6 +151,8 @@ func run() error {
 	if err := dir.Sync(); err != nil {
 		return fmt.Errorf("directory sync: %w", err)
 	}
+
+	log.Printf("closing handles and releasing locks")
 
 	// Close file handles to release locks.
 	if err := srcDBFile.Close(); err != nil {
@@ -145,6 +171,8 @@ func run() error {
 }
 
 func lockAll(ctx context.Context, dbFile *os.File, shmFile **os.File) error {
+	log.Printf("locking to determine journal mode")
+
 	// Acquire shared lock database file to determine mode.
 	if err := lock(ctx, dbFile, syscall.F_RDLCK, PENDING); err != nil {
 		return fmt.Errorf("acquire PENDING lock: %w", err)
@@ -156,6 +184,8 @@ func lockAll(ctx context.Context, dbFile *os.File, shmFile **os.File) error {
 		return fmt.Errorf("release PENDING lock: %w", err)
 	}
 
+	log.Printf("reading database mode")
+
 	// Read mode from header.
 	isWAL, err := isWALMode(dbFile)
 	if err != nil {
@@ -164,6 +194,8 @@ func lockAll(ctx context.Context, dbFile *os.File, shmFile **os.File) error {
 
 	// If journal mode, upgrade to write locks.
 	if !isWAL {
+		log.Printf("destination database is in journal mode")
+
 		if err := lock(ctx, dbFile, syscall.F_WRLCK, RESERVED); err != nil {
 			return fmt.Errorf("acquire exclusive RESERVED lock: %w", err)
 		}
@@ -175,6 +207,8 @@ func lockAll(ctx context.Context, dbFile *os.File, shmFile **os.File) error {
 		}
 		return nil
 	}
+
+	log.Printf("destination database is in WAL mode")
 
 	// If this is WAL mode then create the SHM file, if it doesn't exist.
 	*shmFile, err = os.OpenFile(dbFile.Name()+"-shm", os.O_RDWR|os.O_CREATE, 0666)
@@ -215,31 +249,51 @@ func lockAll(ctx context.Context, dbFile *os.File, shmFile **os.File) error {
 }
 
 func lock(ctx context.Context, f *os.File, typ int16, byt int64) error {
-	start, end := byt, byt
+	start := byt
+	flockLen := int64(1)
 	if start == SHARED {
-		end = SHARED + 510
+		flockLen = 510
 	}
+
+	log.Printf("acquiring lock: (%s,%d,%d)", lockType(typ), start, flockLen)
 
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		// Attempt non-blocking lock until we are successful.
-		println("dbg/lock", start, end)
-		if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &syscall.Flock_t{
+		flock := syscall.Flock_t{
 			Start:  start,
-			Len:    end,
+			Len:    flockLen,
 			Type:   typ,
 			Whence: io.SeekStart,
-		}); err == nil {
+		}
+		if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &flock); err == nil {
+			log.Printf("lock acquired")
 			return nil
 		}
+
+		// Report blocking PID.
+		log.Printf("lock failed, waiting on pid %d", flock.Pid)
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
 		}
+	}
+}
+
+func lockType(typ int16) string {
+	switch typ {
+	case syscall.F_UNLCK:
+		return "UNLCK"
+	case syscall.F_RDLCK:
+		return "RDLCK"
+	case syscall.F_WRLCK:
+		return "WRLCK"
+	default:
+		return fmt.Sprint(typ)
 	}
 }
 
