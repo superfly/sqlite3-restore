@@ -1,0 +1,48 @@
+on:
+  release:
+    types:
+      - created
+
+name: Release
+jobs:
+  linux:
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+          - arch: arm64
+
+    env:
+      GOOS:   linux
+      GOARCH: ${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v3
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - id: release
+        uses: bruceadams/get-release@v1.2.3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Build binary
+        run: |
+          rm -rf dist
+          mkdir -p dist
+          go build -ldflags "-s -w -extldflags "-static" -X 'main.Version=${{ steps.release.outputs.tag_name }}' -X 'main.Commit=${{ github.sha }}'" -tags osusergo,netgo -o dist/sqlite3-restore .
+          cd dist
+          tar -czvf sqlite3-restore-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}.tar.gz sqlite3-restore
+
+      - name: Upload release tarball
+        uses: actions/upload-release-asset@v1.0.2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.release.outputs.upload_url }}
+          asset_path: ./dist/sqlite3-restore-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}.tar.gz
+          asset_name: sqlite3-restore-${{ steps.release.outputs.tag_name }}-${{ env.GOOS }}-${{ env.GOARCH }}.tar.gz
+          asset_content_type: application/gzip
