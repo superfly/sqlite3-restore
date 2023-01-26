@@ -26,3 +26,17 @@ You can also set a timeout to wait on locks. By default, it is set to 5 seconds:
 sqlite3-restore -timeout 30s SRC DST
 ```
 
+## Caveats
+
+The source and destination databases must have the same journal mode when
+performing a restore. Otherwise, you may experience locking issues when restoring.
+
+Please note that running `VACUUM INTO` will cause the output database to have a
+rollback journal mode (`DELETE`) regardless of the journal mode of the database
+you are vacuuming from.
+
+You can update the journal mode using the `sqlite3` CLI:
+
+```sh
+sqlite3 /path/to/src "PRAGMA journal_mode = wal"
+```
